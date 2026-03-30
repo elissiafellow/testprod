@@ -5,7 +5,7 @@ on:
     branches: [main]
 jobs:
   test:
-    uses: moneYOUnion/devops-pipelines/.github/workflows/test.yaml@master
+    uses: ./.github/workflows/test.yaml
     with:
       SERVICE_NAME: "prototype"
       FILE_PATH: "workload_eks/prototype1.yaml" # fallback (required by workflow)

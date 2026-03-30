@@ -1,0 +1,283 @@
+name: EKS Test Build & Deploy
+
+on:
+  workflow_call:
+    inputs:
+      FILE_PATH:
+        description: "service values file path"
+        required: true
+        type: string
+      DEPLOYMENT_FILES:
+        description: "Optional list of values file paths (comma or newline separated). If set, all listed files are updated with the same imageTag."
+        required: false
+        type: string
+      DEPLOY_REPOSITORY:
+        description: "Repository that holds deployment manifests"
+        required: false
+        type: string
+        default: "elissiafellow/testprod"
+      DEPLOY_REPOSITORY_REF:
+        description: "Branch/tag for deployment manifests repository"
+        required: false
+        type: string
+        default: "main"
+      SERVICE_NAME:
+        description: "Service-name"
+        required: true
+        type: string
+      SECRET_FILE_PATH:
+        description: "A path to file to hold the the content defined in 'SECRET_FILE_CONTENT' secret"
+        required: false
+        type: string
+      SECRET_CONTENT_IS_BASE64:
+        description: "Base64 decode the value from 'SECRET_FILE_CONTENT' before writing the file"
+        required: false
+        type: string
+      BUILD_COMMAND:
+        description: "build command"
+        required: false
+        type: string
+      CUSTOM_DOCKER_PATH:
+        description: "This can be helpful for custom docker build commands to override the base one we have"
+        required: false
+        type: string
+    secrets:
+      PAT_TOKEN:
+        description: "PAT TOKEN"
+        required: true
+      NEWRELIC_ACCOUNT_ID:
+        description: "Newrelic Account ID"
+        required: false
+      NEWRELIC_TOKEN:
+        description: "Newrelic API Key"
+        required: false
+      SECRET_FILE_CONTENT:
+        description: "Content of this secret will be written to file path identified by 'SECRET_FILE_PATH'"
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  build:
+    environment: test
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.upload-ecr.outputs.image-tag }}
+      build-number-tag: ${{ steps.upload-ecr.outputs.build-number-tag }}
+
+    steps:
+      - name: Check out microservice code
+        uses: actions/checkout@v4
+
+      - name: Map secret to file
+        if: inputs.SECRET_FILE_PATH && inputs.SECRET_FILE_PATH != '' # Only run if input is provided
+        env:
+          SECRET_FILE_CONTENT: ${{ secrets.SECRET_FILE_CONTENT }}
+          IS_BASE64: ${{ inputs.SECRET_CONTENT_IS_BASE64 || 'false' }}
+        run: |
+          absolute_path="${GITHUB_WORKSPACE}/${{ inputs.SECRET_FILE_PATH }}"  # Ensure path is relative to repo root
+          if [ -z "$SECRET_FILE_CONTENT" ]; then
+            echo "Secret SECRET_FILE_CONTENT is empty or not set."
+            exit 1
+          fi
+          # Overwrite or create the file with the secret content
+          if [ "$IS_BASE64" = "true" ]; then
+            echo "$SECRET_FILE_CONTENT" | base64 --decode > "$absolute_path"
+            echo "Decoded base64 SECRET_FILE_CONTENT and wrote to $absolute_path"
+          else
+            echo "$SECRET_FILE_CONTENT" > "$absolute_path"
+            echo "Mapped SECRET_FILE_CONTENT to $absolute_path, overwriting existing content if file exists."
+          fi
+        shell: bash
+
+      - name: AWS authentication
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::367896522183:role/githubactions-ecr
+          role-session-name: Build-ECR-Image-Test
+          aws-region: eu-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2.0.1
+
+      - name: Ensure ECR repository exists
+        env:
+          SERVICE_NAME: ${{ inputs.SERVICE_NAME }}
+          FILE_PATH: ${{ inputs.FILE_PATH }}
+        run: |
+          # Extract squad name from FILE_PATH (first part before slash)
+          SQUAD_NAME=$(echo "$FILE_PATH" | cut -d'/' -f1)
+
+          # Keep prod-like repository strategy for test validation
+          REPOSITORY="prod/${SQUAD_NAME}/${SERVICE_NAME}"
+
+          echo "🔍 Checking if ECR repository exists: $REPOSITORY"
+
+          # Check if repository exists, create if not
+          if aws ecr describe-repositories --repository-names "$REPOSITORY" --region eu-central-1 2>/dev/null; then
+            echo "✅ Repository $REPOSITORY already exists"
+          else
+            echo "📦 Creating ECR repository: $REPOSITORY"
+            aws ecr create-repository \
+              --repository-name "$REPOSITORY" \
+              --image-scanning-configuration scanOnPush=true \
+              --region eu-central-1
+
+            echo "✅ Successfully created repository: $REPOSITORY"
+          fi
+
+      - name: Build, tag, and push docker image to Amazon ECR
+        id: upload-ecr
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          SERVICE_NAME: ${{ inputs.SERVICE_NAME }}
+          BUILD_COMMAND: ${{ inputs.BUILD_COMMAND }}
+          CUSTOM_DOCKER_PATH: ${{ inputs.CUSTOM_DOCKER_PATH }}
+        run: |
+          DATE=$(date +%Y%m%d)
+          BUILD_NUMBER=${{ github.run_number }}
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+
+          # Extract squad name from FILE_PATH (first part before slash)
+          SQUAD_NAME=$(echo "${{ inputs.FILE_PATH }}" | cut -d'/' -f1)
+          REPOSITORY="prod/${SQUAD_NAME}/${SERVICE_NAME}"
+          BUILD_TAG="${DATE}-${BUILD_NUMBER}"
+          SHA_TAG="${SHORT_SHA}"
+          LATEST_TAG="latest"
+
+          echo "🏷️ Building image:"
+          echo "  Registry: $REGISTRY"
+          echo "  Repository: $REPOSITORY"
+          echo "  Squad: $SQUAD_NAME"
+          echo "  Service: $SERVICE_NAME"
+          echo "  Build tag: $BUILD_TAG"
+          echo "  SHA tag: $SHA_TAG"
+          echo "  Latest tag: $LATEST_TAG"
+
+          # Priority: BUILD_COMMAND > CUSTOM_DOCKER_PATH > default docker build
+          if [ -n "$BUILD_COMMAND" ]; then
+            echo "⚙️ Using BUILD_COMMAND: $BUILD_COMMAND"
+            FULL_COMMAND="$BUILD_COMMAND --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}"
+            eval "$FULL_COMMAND \
+              -t $REGISTRY/$REPOSITORY:$BUILD_TAG \
+              -t $REGISTRY/$REPOSITORY:$SHA_TAG \
+              -t $REGISTRY/$REPOSITORY:$LATEST_TAG"
+          elif [ -n "$CUSTOM_DOCKER_PATH" ]; then
+            echo "⚙️ Using CUSTOM_DOCKER_PATH: $CUSTOM_DOCKER_PATH"
+            eval "$CUSTOM_DOCKER_PATH \
+              --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+              -t $REGISTRY/$REPOSITORY:$BUILD_TAG \
+              -t $REGISTRY/$REPOSITORY:$SHA_TAG \
+              -t $REGISTRY/$REPOSITORY:$LATEST_TAG"
+          else
+            echo "⚙️ Using default docker build command"
+            docker build \
+              --build-arg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+              -t $REGISTRY/$REPOSITORY:$BUILD_TAG \
+              -t $REGISTRY/$REPOSITORY:$SHA_TAG \
+              -t $REGISTRY/$REPOSITORY:$LATEST_TAG \
+              .
+          fi
+
+          echo "📤 Pushing images to ECR..."
+          docker push $REGISTRY/$REPOSITORY:$BUILD_TAG
+          docker push $REGISTRY/$REPOSITORY:$SHA_TAG
+          docker push $REGISTRY/$REPOSITORY:$LATEST_TAG
+
+          echo "image-tag=$BUILD_TAG" >> $GITHUB_OUTPUT
+          echo "build-number-tag=$BUILD_TAG" >> $GITHUB_OUTPUT
+
+          echo "✅ Successfully pushed image with tags: $BUILD_TAG, $SHA_TAG, $LATEST_TAG to repository: $REPOSITORY"
+
+  deploy:
+    needs: build
+    environment: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Display deployment information
+        run: |
+          echo "🚀 Deploying service: ${{ inputs.SERVICE_NAME }}"
+          echo "📦 Image tag: ${{ needs.build.outputs.image-tag }}"
+          echo "🏗️ Build number tag: ${{ needs.build.outputs.build-number-tag }}"
+          echo "📅 Deployment timestamp: $(date)"
+
+      - name: Checkout deploy repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.DEPLOY_REPOSITORY }}
+          path: "./prod-env"
+          ref: ${{ inputs.DEPLOY_REPOSITORY_REF }}
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Update service values file(s)
+        run: |
+          NEW_IMAGE_TAG="${{ needs.build.outputs.image-tag }}"
+          DEPLOYMENT_FILES_INPUT="${{ inputs.DEPLOYMENT_FILES }}"
+          FILE_PATH_INPUT="${{ inputs.FILE_PATH }}"
+
+          if [ -n "$DEPLOYMENT_FILES_INPUT" ]; then
+            TARGET_FILES=$(printf "%s\n" "$DEPLOYMENT_FILES_INPUT" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')
+          else
+            TARGET_FILES="$FILE_PATH_INPUT"
+          fi
+
+          UPDATED_COUNT=0
+          while IFS= read -r REL_PATH; do
+            [ -z "$REL_PATH" ] && continue
+            VALUES_FILE="prod-env/eks/${REL_PATH}"
+
+            if [ ! -f "${VALUES_FILE}" ]; then
+              echo "❌ Values file not found: ${VALUES_FILE}"
+              exit 1
+            fi
+
+            if grep -q "imageTag:" "${VALUES_FILE}"; then
+              sed -i "s|imageTag:.*|imageTag: ${NEW_IMAGE_TAG}|g" "${VALUES_FILE}"
+            else
+              echo "imageTag: ${NEW_IMAGE_TAG}" >> "${VALUES_FILE}"
+            fi
+
+            echo "✅ Updated imageTag in ${VALUES_FILE}"
+            UPDATED_COUNT=$((UPDATED_COUNT + 1))
+          done <<< "$TARGET_FILES"
+
+          echo "📊 Total updated files: ${UPDATED_COUNT}"
+        working-directory: "."
+
+      - name: Commit and push changes
+        run: |
+          cd prod-env
+
+          # Check if there are any changes
+          if git diff --quiet; then
+            echo "ℹ️ No changes detected in values file"
+            exit 0
+          fi
+
+          # Add the modified file
+          git add .
+
+          # Create commit message
+          COMMIT_MSG="chore: update ${SERVICE_NAME} imageTag to ${NEW_IMAGE_TAG} [skip ci]"
+
+          echo "📝 Committing changes..."
+          git commit -m "${COMMIT_MSG}"
+
+          echo "📤 Pushing changes to repository..."
+          git push origin "${DEPLOY_REPOSITORY_REF}"
+
+          echo "✅ Successfully updated ${SERVICE_NAME} image to ${NEW_IMAGE_TAG}"
+        env:
+          SERVICE_NAME: ${{ inputs.SERVICE_NAME }}
+          NEW_IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+          DEPLOY_REPOSITORY_REF: ${{ inputs.DEPLOY_REPOSITORY_REF }}
