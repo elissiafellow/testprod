@@ -1,0 +1,15 @@
+name: Test Main Pipeline Caller
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: moneYOUnion/devops-pipelines/.github/workflows/test.yaml@master
+    with:
+      SERVICE_NAME: "prototype"
+      FILE_PATH: "workload_eks/prototype1.yaml" # fallback (required by workflow)
+      DEPLOYMENT_FILES: |
+        workload_eks/prototype1.yaml
+        workload_eks/protoype2.yaml
+    secrets: inherit
