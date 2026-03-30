@@ -44,7 +44,7 @@ on:
     secrets:
       PAT_TOKEN:
         description: "PAT TOKEN"
-        required: true
+        required: false
       NEWRELIC_ACCOUNT_ID:
         description: "Newrelic Account ID"
         required: false
