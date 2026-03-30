@@ -1,8 +1,8 @@
 name: Test Main Pipeline Caller
 
 on:
-  workflow_dispatch:
-
+  push:
+    branches: [main]
 jobs:
   test:
     uses: moneYOUnion/devops-pipelines/.github/workflows/test.yaml@master
