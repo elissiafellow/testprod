@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    uses: elissiafellow/testprod/.github/workflows/test.yaml@latest
+    uses: elissiafellow/testprod/.github/workflows/test.yaml@main
     with:
       SERVICE_NAME: "prototype"
       FILE_PATH: "workload_eks/prototype1.yaml"
