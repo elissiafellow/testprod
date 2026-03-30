@@ -1,14 +1,19 @@
-name: Test Main Pipeline Caller
+name: Caller
 
 on:
   push:
-    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
 jobs:
   test:
-    uses: ./.github/workflows/test.yaml
+    uses: elissiafellow/testprod/.github/workflows/test.yaml@a2987c56a7e130aa9d1fb98809e8c7c70f7298b0
     with:
       SERVICE_NAME: "prototype"
-      FILE_PATH: "workload_eks/prototype1.yaml" # fallback (required by workflow)
+      FILE_PATH: "workload_eks/prototype1.yaml"
       DEPLOYMENT_FILES: |
         workload_eks/prototype1.yaml
         workload_eks/protoype2.yaml
